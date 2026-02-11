@@ -11,7 +11,6 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 1️⃣ Build spectral domain
     domain = SpectralDomain(
         lambdaMin=400.0,
         lambdaMax=700.0,

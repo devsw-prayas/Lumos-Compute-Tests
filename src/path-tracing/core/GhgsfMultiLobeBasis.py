@@ -14,8 +14,7 @@ class GHGSFMultiLobeBasis:
         sigma: float,
         order: int
     ):
-        self.m_basisTight = None
-        self.m_gramInvSqrt = None
+        self.m_gramInv = None
         self.m_gram = None
         self.m_basisRaw = None
         self.m_domain  = domain
@@ -34,7 +33,6 @@ class GHGSFMultiLobeBasis:
 
         self.internalBuildBasis()
         self.internalComputeGram()
-        self.internalComputeTightFrame()
 
     def internalBuildBasis(self):
         lbda = self.m_domain.m_lambda  # [L]
@@ -70,36 +68,39 @@ class GHGSFMultiLobeBasis:
         self.m_basisRaw = phi.reshape(self.m_M, -1)  # [M, L]
 
     def internalComputeGram(self):
-
         B = self.m_basisRaw
         w = self.m_domain.m_weights
 
         Bw = B * w
         self.m_gram = Bw @ B.T
 
-    def internalComputeTightFrame(self):
-
-        eigvals, eigvecs = torch.linalg.eigh(self.m_gram)
-
-        G_inv_sqrt = (
-            eigvecs
-            @ torch.diag(1.0 / torch.sqrt(eigvals))
-            @ eigvecs.T
-        )
-
-        self.m_gramInvSqrt = G_inv_sqrt
-        self.m_basisTight = G_inv_sqrt @ self.m_basisRaw
+        # Precompute inverse once (GPU)
+        self.m_gramInv = torch.linalg.pinv(self.m_gram)
 
     def project(self, spectrum: Tensor) -> Tensor:
 
-        B = self.m_basisTight
-        w = self.m_domain.m_weights
+        is_complex = torch.is_complex(spectrum)
 
-        return (B * w) @ spectrum
+        if is_complex:
+            B = self.m_basisRaw.to(torch.complex128)
+            w = self.m_domain.m_weights.to(torch.complex128)
+            G_inv = self.m_gramInv.to(torch.complex128)
+        else:
+            B = self.m_basisRaw
+            w = self.m_domain.m_weights
+            G_inv = self.m_gramInv
+
+        b = (B * w) @ spectrum
+        return G_inv @ b
 
     def reconstruct(self, coeffs: Tensor) -> Tensor:
 
-        return coeffs @ self.m_basisTight
+        if torch.is_complex(coeffs):
+            B = self.m_basisRaw.to(torch.complex128)
+        else:
+            B = self.m_basisRaw
+
+        return coeffs @ B
 
 
 

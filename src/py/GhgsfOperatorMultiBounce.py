@@ -56,7 +56,7 @@ def iridescence_function(l, delta, A=0.4):
 # ------------------------------------------------------------
 sigma_lobe = 12.0
 lobes = np.linspace(405, 695, 8)
-modes_per_lobe = 6
+modes_per_lobe = 12
 
 basis = []
 dx = dl / sigma_lobe

@@ -80,7 +80,7 @@ class PlotEngine:
 
         # Configure grid
         self.m_axes.grid(True, which='major', linestyle='-',
-                         linewidth=0.5, alpha=0.2, color=self.s_colors['grid'])
+                         linewidth=0.5, alpha=0.12, color=self.s_colors['grid'])
 
         # Configure ticks
         self.m_axes.tick_params(
@@ -124,6 +124,9 @@ class PlotEngine:
 
         self.m_axes.plot(xData, yData, label=label, color=color,
                          linewidth=linewidth, linestyle=linestyle, alpha=alpha)
+
+        # Prevent edge clipping
+        self.m_axes.margins(x=0.01)
 
     def addScatter(self, xData: np.ndarray, yData: np.ndarray,
                    label: Optional[str] = None,
@@ -211,7 +214,7 @@ class PlotEngine:
             self.m_axes.set_ylim(ylim)
 
     def addLegend(self, location: str = 'best',
-                  framealpha: float = 0.7,
+                  framealpha: float = 0.5,
                   edgecolor: Optional[str] = None) -> None:
         """
         Add a minimal, clean legend.
@@ -230,7 +233,8 @@ class PlotEngine:
             framealpha=framealpha,
             edgecolor=edgecolor,
             fancybox=False,
-            shadow=False
+            shadow=False,
+            borderpad=0.3
         )
 
         # Style the legend
@@ -265,6 +269,44 @@ class PlotEngine:
                          color=color,
                          ha=horizontalAlign,
                          va=verticalAlign)
+
+    def annotateAxesText(self, text: str,
+                         position: str = 'upper left',
+                         fontsize: Optional[int] = None,
+                         color: Optional[str] = None) -> None:
+        """
+        Add text annotation in axes coordinates (0-1 range).
+
+        Ideal for dense plots where data coordinates are awkward.
+        Uses axes-relative positioning that stays fixed regardless of data scale.
+
+        Args:
+            text: Annotation text (supports LaTeX mathtext)
+            position: Position ('upper left', 'upper right', 'lower left', 'lower right')
+            fontsize: Font size (defaults to annotation size)
+            color: Text color
+        """
+        if fontsize is None:
+            fontsize = self.s_fontSizes['annotation']
+        if color is None:
+            color = self.s_colors['text']
+
+        # Position mapping: (x, y, ha, va)
+        positionMap = {
+            'upper left': (0.03, 0.97, 'left', 'top'),
+            'upper right': (0.97, 0.97, 'right', 'top'),
+            'lower left': (0.03, 0.03, 'left', 'bottom'),
+            'lower right': (0.97, 0.03, 'right', 'bottom'),
+        }
+
+        xPos, yPos, ha, va = positionMap.get(position, positionMap['upper left'])
+
+        self.m_axes.text(xPos, yPos, text,
+                         transform=self.m_axes.transAxes,
+                         fontsize=fontsize,
+                         color=color,
+                         ha=ha,
+                         va=va)
 
     def annotateMetricsBlock(self, metrics: Dict[str, Any],
                              position: str = 'upper right',
@@ -318,7 +360,6 @@ class PlotEngine:
             dpi: Resolution in dots per inch (300+ for publication)
             transparentBackground: Use transparent background
         """
-        self.m_figure.tight_layout()
         self.m_figure.savefig(filepath, dpi=dpi,
                               facecolor=self.m_figure.get_facecolor(),
                               transparent=transparentBackground,
@@ -326,7 +367,6 @@ class PlotEngine:
 
     def show(self) -> None:
         """Display the figure."""
-        self.m_figure.tight_layout()
         plt.show()
 
     def clear(self) -> None:
@@ -351,40 +391,51 @@ class MultiPanelEngine:
     automatic spacing, optional shared axes, and consistent theming.
     """
 
-    def __init__(self, nrows: int, figsize: Tuple[float, float] = (10, 12),
-                 sharex: bool = False):
+    def __init__(self, nrows: int, ncols: int = 1,
+                 figsize: Tuple[float, float] = (10, 12),
+                 sharex: bool = False,
+                 compact: bool = False):
         """
         Initialize multi-panel engine.
 
         Args:
-            nrows: Number of vertically stacked panels
+            nrows: Number of rows in the grid
+            ncols: Number of columns in the grid (default: 1 for vertical stacking)
             figsize: Figure dimensions in inches (width, height)
             sharex: Share X-axis across all panels
+            compact: Use compact spacing for dense layouts
         """
         self.m_nrows = nrows
+        self.m_ncols = ncols
         self.m_figsize = figsize
         self.m_sharex = sharex
         self.m_figure = None
         self.m_axes = []
         self.m_panels = []
+        self.m_compact = compact
 
         self.internalInitializePanels()
 
     def internalInitializePanels(self) -> None:
-        """Create figure with vertically stacked panels."""
+        """Create figure with grid layout (supports both vertical stacking and grid)."""
         # Create subplots with optimized spacing
         self.m_figure, axesArray = plt.subplots(
-            self.m_nrows, 1,
+            self.m_nrows, self.m_ncols,
             figsize=self.m_figsize,
             sharex=self.m_sharex,
-            facecolor=PlotEngine.s_colors['figure_bg']
+            facecolor=PlotEngine.s_colors['figure_bg'],
+            constrained_layout=True
         )
 
-        # Handle single vs multiple axes
-        if self.m_nrows == 1:
+        # Flatten axes array for consistent indexing
+        if self.m_nrows == 1 and self.m_ncols == 1:
             self.m_axes = [axesArray]
+        elif self.m_nrows == 1 or self.m_ncols == 1:
+            # Single row or column - already 1D
+            self.m_axes = axesArray if isinstance(axesArray, np.ndarray) else [axesArray]
         else:
-            self.m_axes = axesArray
+            # Grid layout - flatten to 1D array
+            self.m_axes = np.array(axesArray).reshape(-1)
 
         # Set figure background
         self.m_figure.patch.set_facecolor(PlotEngine.s_colors['figure_bg'])
@@ -398,8 +449,6 @@ class MultiPanelEngine:
             panel = self.internalCreatePanelFromAxes(ax)
             self.m_panels.append(panel)
 
-        # Adjust spacing for dense layouts
-        self.m_figure.subplots_adjust(hspace=0.3)
 
     def internalCreatePanelFromAxes(self, ax) -> PlotEngine:
         """
@@ -427,13 +476,14 @@ class MultiPanelEngine:
         Get a specific panel for plotting.
 
         Args:
-            index: Panel index (0-based)
+            index: Panel index (0-based, row-major order for grids)
 
         Returns:
             PlotEngine instance for the requested panel
         """
-        if index < 0 or index >= self.m_nrows:
-            raise IndexError(f"Panel index {index} out of range [0, {self.m_nrows - 1}]")
+        totalPanels = self.m_nrows * self.m_ncols
+        if index < 0 or index >= totalPanels:
+            raise IndexError(f"Panel index {index} out of range [0, {totalPanels - 1}]")
 
         return self.m_panels[index]
 
@@ -448,9 +498,11 @@ class MultiPanelEngine:
         if fontSize is None:
             fontSize = PlotEngine.s_fontSizes['suptitle']
 
-        self.m_figure.suptitle(title, fontsize=fontSize,
-                               color=PlotEngine.s_colors['text'],
-                               y=0.995)
+        self.m_figure.suptitle(
+            title,
+            fontsize=fontSize,
+            color=PlotEngine.s_colors['text']
+        )
 
     def saveFigure(self, filepath: str, dpi: int = 300,
                    transparentBackground: bool = False) -> None:
@@ -462,7 +514,6 @@ class MultiPanelEngine:
             dpi: Resolution in dots per inch
             transparentBackground: Use transparent background
         """
-        self.m_figure.tight_layout(rect=[0, 0, 1, 0.99])
         self.m_figure.savefig(filepath, dpi=dpi,
                               facecolor=self.m_figure.get_facecolor(),
                               transparent=transparentBackground,
@@ -470,7 +521,6 @@ class MultiPanelEngine:
 
     def show(self) -> None:
         """Display the multi-panel figure."""
-        self.m_figure.tight_layout(rect=[0, 0, 1, 0.99])
         plt.show()
 
     def close(self) -> None:
@@ -480,6 +530,56 @@ class MultiPanelEngine:
             self.m_figure = None
             self.m_axes = []
             self.m_panels = []
+
+    def applyDenseLayout(self):
+        """
+        Apply dense layout formatting for multi-panel figures.
+
+        Reduces title font sizes and optimizes for vertical space.
+        All panels keep their x-axis labels and ticks.
+        """
+        # Reduce subplot title font size for all panels
+        for panel in self.m_panels:
+            # Store current title if it exists
+            if panel.m_axes.get_title():
+                currentTitle = panel.m_axes.get_title()
+                panel.m_axes.set_title(currentTitle, fontsize=9,
+                                       color=PlotEngine.s_colors['text'], pad=8)
+
+            # Add vertical margins to prevent point clipping
+            panel.m_axes.margins(y=0.05)
+
+    def applyPublicationPreset(self):
+        """
+        Apply publication-quality preset formatting.
+
+        Optimizes the figure for high-quality journal submission:
+        - Reduces grid alpha for cleaner appearance
+        - Increases line widths for visibility
+        - Enlarges label fonts for readability
+        - Tightens subplot spacing
+        - Ensures proper DPI export
+        """
+        for panel in self.m_panels:
+            # Reduce grid alpha further
+            panel.m_axes.grid(True, which='major', linestyle='-',
+                            linewidth=0.5, alpha=0.08,
+                            color=PlotEngine.s_colors['grid'])
+
+            # Increase label font size
+            if panel.m_axes.get_xlabel():
+                panel.m_axes.set_xlabel(panel.m_axes.get_xlabel(),
+                                       fontsize=11)
+            if panel.m_axes.get_ylabel():
+                panel.m_axes.set_ylabel(panel.m_axes.get_ylabel(),
+                                       fontsize=11)
+
+            # Slightly increase spine width
+            for spine in panel.m_axes.spines.values():
+                spine.set_linewidth(1.0)
+
+    def addLegendOnlyFirst(self, location: str = 'upper right'):
+        self.m_panels[0].addLegend(location=location)
 
 
 class AnimationEngine:
@@ -555,3 +655,8 @@ class AnimationEngine:
 plt.rcParams['font.family'] = 'DejaVu Sans'
 plt.rcParams['mathtext.fontset'] = 'dejavusans'
 plt.rcParams['mathtext.default'] = 'regular'
+
+# Global rendering consistency
+plt.rcParams['figure.autolayout'] = False
+plt.rcParams['axes.titlepad'] = 8
+plt.rcParams['axes.labelpad'] = 6

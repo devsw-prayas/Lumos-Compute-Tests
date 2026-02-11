@@ -1,5 +1,6 @@
 from typing import Callable
 
+import torch
 from torch import Tensor
 
 from core.GhgsfMultiLobeBasis import GHGSFMultiLobeBasis
@@ -21,11 +22,18 @@ class EmissionOperator(SpectralOperator):
 
         lbd = self.m_basis.m_domain.m_lambda
         w = self.m_basis.m_domain.m_weights
-        B = self.m_basis.m_basisTight
+        B = self.m_basis.m_basisRaw
+        G_inv = self.m_basis.m_gramInv
 
         spectrum = self.m_emissionFn(lbd)
 
-        self.m_vector = (B * w) @ spectrum
+        if torch.is_complex(spectrum):
+            B = B.to(torch.complex128)
+            w = w.to(torch.complex128)
+            G_inv = G_inv.to(torch.complex128)
+
+        b = (B * w) @ spectrum
+        self.m_vector = G_inv @ b
 
     def emit(self) -> Tensor:
 

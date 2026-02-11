@@ -56,6 +56,7 @@ def dispersion(l):
     phase = 0.002 * (l - 555.0)**2
     return base * np.exp(1j * phase)
 
+
 cases = {
     "D65": d65(lam),
     "LEDs": leds(lam),
