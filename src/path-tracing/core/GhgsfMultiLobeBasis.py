@@ -68,29 +68,39 @@ class GHGSFMultiLobeBasis:
         self.m_basisRaw = phi.reshape(self.m_M, -1)  # [M, L]
 
     def internalComputeGram(self):
+
+        # Raw sampled basis [M, L]
         B = self.m_basisRaw
-        w = self.m_domain.m_weights
 
-        Bw = B * w
-        self.m_gram = Bw @ B.T
+        # Match NumPy reference exactly:
+        # dx = dl / sigma
+        dl = self.m_domain.m_delta
+        dx = dl / self.m_sigma
 
-        # Precompute inverse once (GPU)
-        self.m_gramInv = torch.linalg.pinv(self.m_gram)
+        # Uniform integration metric
+        self.m_gram = (B @ B.T) * dx
+
+        # Exact inverse (as in NumPy version)
+        self.m_gramInv = torch.linalg.inv(self.m_gram)
 
     def project(self, spectrum: Tensor) -> Tensor:
 
         is_complex = torch.is_complex(spectrum)
 
-        if is_complex:
-            B = self.m_basisRaw.to(torch.complex128)
-            w = self.m_domain.m_weights.to(torch.complex128)
-            G_inv = self.m_gramInv.to(torch.complex128)
-        else:
-            B = self.m_basisRaw
-            w = self.m_domain.m_weights
-            G_inv = self.m_gramInv
+        B = self.m_basisRaw
+        G_inv = self.m_gramInv
 
-        b = (B * w) @ spectrum
+        dl = self.m_domain.m_delta
+        dx = dl / self.m_sigma
+
+        if is_complex:
+            B = B.to(torch.complex128)
+            G_inv = G_inv.to(torch.complex128)
+
+        # Match NumPy:
+        # b = basis @ spectrum * dx
+        b = (B @ spectrum) * dx
+
         return G_inv @ b
 
     def reconstruct(self, coeffs: Tensor) -> Tensor:

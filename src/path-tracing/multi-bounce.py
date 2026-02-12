@@ -15,7 +15,7 @@ dtype = torch.float64
 domain = SpectralDomain(
     lambdaMin=400.0,
     lambdaMax=700.0,
-    numSamples=2048,
+    numSamples=4096,
     device=device,
     dtype=dtype
 )
@@ -61,8 +61,8 @@ def iridescence_function(l, delta, A=0.4):
 # GHGSF Basis (Stable Sweet Spot)
 # ============================================================
 
-sigma = 12
-lobes = torch.linspace(420.0, 680.0, 8).tolist()
+sigma = 6
+lobes = torch.linspace(405.0, 695.0, 8).tolist()
 order = 6
 
 basis = GHGSFMultiLobeBasis(
@@ -82,14 +82,13 @@ alpha_init = basis.project(S_init)
 # ============================================================
 
 def build_operator(f_lambda):
-
-    B = basis.m_basisRaw           # [M, L]
-    w = basis.m_domain.m_weights   # [L]
+    B = basis.m_basisRaw
+    dl = basis.m_domain.m_delta
+    dx = dl / basis.m_sigma
 
     weighted_basis = B * f_lambda.unsqueeze(0)
-    Bw = B * w
 
-    O_raw = Bw @ weighted_basis.T
+    O_raw = (weighted_basis @ B.T) * dx
 
     return basis.m_gramInv @ O_raw
 
@@ -102,27 +101,31 @@ rng = np.random.default_rng(42)
 max_bounces = 20
 errors_L2 = []
 
-S_gt = S_init.clone()
-alpha = alpha_init.clone()
+for bounce_depth in range(1, max_bounces + 1):
 
-for bounce in range(max_bounces):
+    # Restart from clean initial state
+    S_gt = S_init.clone()
+    alpha = alpha_init.clone()
 
-    sigma_s = random_smooth_spectrum(lam, rng)
-    refl    = random_smooth_spectrum(lam, rng)
-    delta   = rng.uniform(600.0, 2200.0)
+    for _ in range(bounce_depth):
 
-    f_lambda = torch.exp(-sigma_s * rng.uniform(0.1, 1.5))
-    f_lambda *= refl
-    f_lambda *= iridescence_function(lam, delta)
+        sigma_s = random_smooth_spectrum(lam, rng)
+        refl    = random_smooth_spectrum(lam, rng)
+        delta   = rng.uniform(600.0, 2200.0)
 
-    O = build_operator(f_lambda)
+        f_lambda = torch.exp(-sigma_s * rng.uniform(0.1, 1.5))
+        f_lambda *= refl
+        f_lambda *= iridescence_function(lam, delta)
 
-    # Ground truth update
-    S_gt = S_gt * f_lambda
+        O = build_operator(f_lambda)
 
-    # Operator update
-    alpha = O @ alpha
+        # Ground truth
+        S_gt = S_gt * f_lambda
 
+        # Operator transport
+        alpha = O @ alpha
+
+    # Reconstruction
     S_op = basis.reconstruct(alpha)
 
     # Normalize
@@ -134,6 +137,7 @@ for bounce in range(max_bounces):
     ).item()
 
     errors_L2.append(L2)
+
 
 # ============================================================
 # Plot 1: Error Growth
