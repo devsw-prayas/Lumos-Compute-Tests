@@ -1,8 +1,13 @@
 import torch
 import numpy as np
+
+import prrequisite
 from core.SpectralDomain import SpectralDomain
 from core.GhgsfMultiLobeBasis import GHGSFMultiLobeBasis
 from plotting.Plot import MultiPanelEngine
+
+prrequisite.SandboxRuntime.bootstrap()
+
 
 # ============================================================
 # Domain

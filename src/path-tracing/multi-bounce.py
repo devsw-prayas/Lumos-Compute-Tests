@@ -4,13 +4,22 @@ import numpy as np
 from core.SpectralDomain import SpectralDomain
 from core.GhgsfMultiLobeBasis import GHGSFMultiLobeBasis
 from plotting.Plot import PlotEngine
+import prrequisite
 
 # ============================================================
 # Domain
 # ============================================================
 
-device = torch.device("cuda")
-dtype = torch.float64
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_default_dtype(torch.float32)
+torch.set_default_device(torch.device("cuda"))
+
+dtype = torch.get_default_dtype()
+device = torch.get_default_device()
+
+print(dtype)
+print(device)
 
 domain = SpectralDomain(
     lambdaMin=400.0,
@@ -61,7 +70,7 @@ def iridescence_function(l, delta, A=0.4):
 # GHGSF Basis (Stable Sweet Spot)
 # ============================================================
 
-sigma = 6
+sigma = 12
 lobes = torch.linspace(405.0, 695.0, 8).tolist()
 order = 6
 
@@ -93,50 +102,85 @@ def build_operator(f_lambda):
     return basis.m_gramInv @ O_raw
 
 # ============================================================
-# Multi-Bounce Sweep
+# Ultra High Bounce Test (PURE TORCH)
 # ============================================================
 
-rng = np.random.default_rng(42)
+gen = torch.Generator(device=device)
+gen.manual_seed(42)
 
-max_bounces = 20
+num_paths   = 64
+max_bounces = 15
+
 errors_L2 = []
+bounce_levels = []
 
 for bounce_depth in range(1, max_bounces + 1):
 
-    # Restart from clean initial state
-    S_gt = S_init.clone()
-    alpha = alpha_init.clone()
+    accum_gt = torch.zeros_like(lam)
+    accum_op = torch.zeros_like(lam)
 
-    for _ in range(bounce_depth):
+    for p in range(num_paths):
 
-        sigma_s = random_smooth_spectrum(lam, rng)
-        refl    = random_smooth_spectrum(lam, rng)
-        delta   = rng.uniform(600.0, 2200.0)
+        S_gt = S_init.clone()
+        alpha = alpha_init.clone()
 
-        f_lambda = torch.exp(-sigma_s * rng.uniform(0.1, 1.5))
-        f_lambda *= refl
-        f_lambda *= iridescence_function(lam, delta)
+        for _ in range(bounce_depth):
 
-        O = build_operator(f_lambda)
+            # ----- random smooth absorption -----
+            sigma_s = torch.zeros_like(lam)
 
-        # Ground truth
-        S_gt = S_gt * f_lambda
+            for _ in range(torch.randint(2, 5, (1,), generator=gen, device=device).item()):
+                center = 410.0 + 280.0 * torch.rand(1, generator=gen, device=device)
+                width  = 10.0 + 30.0 * torch.rand(1, generator=gen, device=device)
+                amp    = 0.3 + 0.9 * torch.rand(1, generator=gen, device=device)
 
-        # Operator transport
-        alpha = O @ alpha
+                sigma_s += amp * torch.exp(
+                    -0.5 * ((lam - center) / width)**2
+                )
 
-    # Reconstruction
-    S_op = basis.reconstruct(alpha)
+            # ----- random reflectance -----
+            refl = torch.zeros_like(lam)
 
-    # Normalize
-    S_gt_norm = S_gt / domain.integrate(S_gt)
-    S_op_norm = S_op / domain.integrate(S_op)
+            for _ in range(torch.randint(2, 5, (1,), generator=gen, device=device).item()):
+                center = 410.0 + 280.0 * torch.rand(1, generator=gen, device=device)
+                width  = 10.0 + 30.0 * torch.rand(1, generator=gen, device=device)
+                amp    = 0.3 + 0.9 * torch.rand(1, generator=gen, device=device)
 
+                refl += amp * torch.exp(
+                    -0.5 * ((lam - center) / width)**2
+                )
+
+            delta = 600.0 + 1600.0 * torch.rand(1, generator=gen, device=device)
+
+            f_lambda = torch.exp(-sigma_s * (0.1 + 1.4 * torch.rand(1, generator=gen, device=device)))
+            f_lambda *= refl
+            f_lambda *= (1.0 + 0.4 * torch.cos(2.0 * torch.pi * delta / lam))
+
+            # ----- ground truth update -----
+            S_gt = S_gt * f_lambda
+
+            # ----- operator update -----
+            O = build_operator(f_lambda)
+            alpha = O @ alpha
+
+        accum_gt += S_gt
+        accum_op += basis.reconstruct(alpha)
+
+    # ----- average paths -----
+    accum_gt /= num_paths
+    accum_op /= num_paths
+
+    # ----- normalize -----
+    accum_gt /= domain.integrate(accum_gt)
+    accum_op /= domain.integrate(accum_op)
+
+    # ----- L2 error -----
     L2 = torch.sqrt(
-        domain.integrate((S_gt_norm - S_op_norm)**2)
+        domain.integrate((accum_gt - accum_op) ** 2)
     ).item()
 
     errors_L2.append(L2)
+    bounce_levels.append(bounce_depth)
 
 
 # ============================================================
@@ -146,46 +190,35 @@ for bounce_depth in range(1, max_bounces + 1):
 engine_err = PlotEngine(figsize=(8, 5))
 
 engine_err.addLine(
-    np.arange(1, max_bounces + 1),
-    np.array(errors_L2),
+    torch.tensor(bounce_levels).cpu().numpy(),
+    torch.tensor(errors_L2).cpu().numpy(),
     linewidth=2.2,
     label="L2 Error"
 )
 
-engine_err.setTitle(
-    f"BsSPT Multi-Bounce Error Growth\nGram cond = {cond:.2e}"
-)
-
+engine_err.setTitle("Operator-Space Spectral Transport Error Growth")
 engine_err.setLabels("Bounce Depth", "L2 Error")
 engine_err.addLegend()
-
 engine_err.show()
-
-# ============================================================
-# Plot 2: Final Spectrum Comparison
-# ============================================================
 
 engine_spec = PlotEngine(figsize=(10, 4))
 
-lam_cpu = lam.detach().cpu().numpy()
-
 engine_spec.addLine(
-    lam_cpu,
-    S_gt_norm.detach().cpu().numpy(),
+    lam.detach().cpu().numpy(),
+    accum_gt.detach().cpu().numpy(),
     linewidth=2.5,
     label="Ground Truth"
 )
 
 engine_spec.addLine(
-    lam_cpu,
-    S_op_norm.detach().cpu().numpy(),
+    lam.detach().cpu().numpy(),
+    accum_op.detach().cpu().numpy(),
     linestyle="--",
     linewidth=2.5,
-    label="BsSPT"
+    label="Operator BsSPT"
 )
 
-engine_spec.setTitle("Final Spectrum After Multi-Bounce Transport")
+engine_spec.setTitle("Final Spectrum After Ultra High Bounces")
 engine_spec.setLabels("Wavelength (nm)", "Power")
 engine_spec.addLegend()
-
 engine_spec.show()

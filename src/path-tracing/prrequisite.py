@@ -44,6 +44,7 @@ class SandboxRuntime:
         torch.backends.cudnn.allow_tf32 = True
 
         torch.set_default_dtype(torch.float32)
+        torch.set_default_device(torch.device("cuda"))
 
         print("[SandboxRuntime] TF32 enabled (default float32 compute)")
 
@@ -54,7 +55,6 @@ class SandboxRuntime:
         numThreads: int = 8
     ) -> None:
 
-        SandboxRuntime.configureDeterminism(seed)
         SandboxRuntime.configureThreading(numThreads)
         SandboxRuntime.configurePrecisionTF32()
 
