@@ -25,7 +25,7 @@ domain = SpectralDomain(
 
 K_values = [4,5,6,7,8]
 N_values = [4,5,6,7,8]
-sigma_values = [6,8,10,12,14,16,18,20]
+sigma_values = [6,7,8,9,10,11,12,13]
 
 results = {}
 

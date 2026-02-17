@@ -58,11 +58,11 @@ def iridescence(S, l, delta, A=0.4):
 # ------------------------------------------------------------
 # GHGSF construction
 # ------------------------------------------------------------
-sigma_lobe = 20.0
+sigma_lobe = 8.0
 dx = dl / sigma_lobe
 
 lobes = np.linspace(410, 690, 8)
-modes_per_lobe = 8
+modes_per_lobe = 6
 
 basis = []
 for center in lobes:

@@ -1,56 +1,50 @@
 import torch
+from torch import Tensor
 
 from core.SpectralOperator import SpectralOperator
+from core.GhgsfMultiLobeBasis import GHGSFMultiLobeBasis
 
 
 class DispersionOperator(SpectralOperator):
 
-    def __init__(self, basis, theta_i, theta_o, sigma_theta):
+    def __init__(
+        self,
+        basis: GHGSFMultiLobeBasis,
+        transferFunction: Tensor  # T(λ), complex allowed
+    ):
         super().__init__(basis)
-        self.theta_i = theta_i
-        self.theta_o = theta_o
-        self.sigma_theta = sigma_theta
+
+        self.m_transfer = transferFunction  # shape [L]
 
     def buildMatrix(self):
-        lbd = self.m_basis.m_domain.m_lambda
-        B = self.m_basis.m_basisRaw
-        G_inv = self.m_basis.m_gramInv
 
-        # --- Same integration metric as Gram ---
-        dl = self.m_basis.m_domain.m_delta
-        dx = dl / self.m_basis.m_sigma
+        B = self.m_basis.m_basisRaw          # [M, L]
+        G = self.m_basis.m_gram              # [M, M]
+        w = self.m_basis.m_domain.m_weights  # [L]
 
-        # Cauchy IOR
-        eta_i = 1.0
-        eta = 1.5 + 0.004 / (lbd ** 2)
+        T = self.m_transfer                  # [L]
 
-        # Snell
-        sin_theta_t = (eta_i / eta) * torch.sin(self.theta_i)
-        theta_t = torch.asin(sin_theta_t)
+        # --- Type alignment ---
+        if torch.is_complex(T):
+            B = B.to(T.dtype)
+            G = G.to(T.dtype)
 
-        # Fresnel transmission (unpolarized)
-        cos_i = torch.cos(self.theta_i)
-        cos_t = torch.sqrt(1.0 - sin_theta_t ** 2)
+        # --- Weighted multiplication ---
+        # Implements:
+        #   M_raw[i,j] = ∫ φ_i(λ) T(λ) φ_j(λ) dλ
+        #
+        # Discrete:
+        #   sum_k φ_i(λ_k) T(λ_k) φ_j(λ_k) w_k
 
-        rs = ((eta_i * cos_i - eta * cos_t) / (eta_i * cos_i + eta * cos_t)) ** 2
-        rp = ((eta * cos_i - eta_i * cos_t) / (eta * cos_i + eta_i * cos_t)) ** 2
-        R = 0.5 * (rs + rp)
-        T_lambda = 1.0 - R
+        weighted = B * (w * T)               # broadcast over λ
+        M_raw = weighted @ B.T               # [M, M]
 
-        # Gaussian selector
-        selector = torch.exp(
-            -(self.theta_o - theta_t) ** 2
-            / (2.0 * self.sigma_theta ** 2)
-        )
+        # --- Galerkin projection ---
+        # Solve G X = M_raw  →  X = G^{-1} M_raw
+        #
+        # Do NOT use inverse explicitly
 
-        # --- Normalize in physical wavelength space ---
-        w = self.m_basis.m_domain.m_weights
-        pdf_theta = torch.sum(T_lambda * selector * w)
+        if torch.is_complex(M_raw):
+            G = G.to(M_raw.dtype)
 
-        T = (T_lambda * selector) / pdf_theta
-
-        # --- Galerkin assembly using dx ---
-        weighted = B * (dx * T)
-        M_raw = weighted @ B.T
-
-        self.m_matrix = G_inv @ M_raw
+        self.m_matrix = torch.linalg.solve(G, M_raw)

@@ -70,7 +70,7 @@ def iridescence_function(l, delta, A=0.4):
 # GHGSF Basis (Stable Sweet Spot)
 # ============================================================
 
-sigma = 12
+sigma = 8.78
 lobes = torch.linspace(405.0, 695.0, 8).tolist()
 order = 6
 
