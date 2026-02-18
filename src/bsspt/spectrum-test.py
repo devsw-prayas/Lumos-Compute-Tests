@@ -1,12 +1,13 @@
 import torch
 import numpy as np
 
-import prrequisite
-from core.SpectralDomain import SpectralDomain
-from core.GhgsfMultiLobeBasis import GHGSFMultiLobeBasis
-from plotting.Plot import MultiPanelEngine
+from engine.ghgsfbasisscaled import GHGSFMultiLobeBasisScaled
+from engine.spectraldomain import SpectralDomain
+from engine.ghgsfbasis import GHGSFMultiLobeBasis
+from engine.spectralstate import SpectralState
+from engine.whitening import WhitenOperator
 
-prrequisite.SandboxRuntime.bootstrap()
+from plotting.Plot import MultiPanelEngine
 
 
 # ============================================================
@@ -23,7 +24,6 @@ domain = SpectralDomain(
 
 lbd = domain.m_lambda
 
-torch.set_default_dtype(torch.float64)
 
 # ============================================================
 # Utility
@@ -32,8 +32,9 @@ torch.set_default_dtype(torch.float64)
 def normalize(S):
     return S / domain.integrate(torch.abs(S))
 
+
 # ============================================================
-# Spectral Cases (Torch)
+# Real Spectral Cases
 # ============================================================
 
 def d65(l):
@@ -54,22 +55,6 @@ def blackbody(l, T=6500.0):
     c2 = 1.4388e7
     return (l**-5) / (torch.exp(c2 / (l * T)) - 1.0)
 
-def beer_lambert(l):
-    return d65(l) * torch.exp(-0.015 * (l - 500.0))
-
-def reflectance(l):
-    R = (
-        0.7
-        - 0.4 * torch.exp(-0.5 * ((l - 500.0) / 30.0)**2)
-        - 0.3 * torch.exp(-0.5 * ((l - 650.0) / 20.0)**2)
-    )
-    return torch.clamp(R, 0.0, 1.0)
-
-def iridescence(l):
-    env = torch.exp(-0.5 * ((l - 550.0) / 60.0)**2)
-    osc = 0.5 * (1.0 + torch.cos(0.25 * l))
-    return env * osc
-
 def step_spectrum(l):
     return torch.where(l < 550.0, 1.0, 0.25)
 
@@ -83,29 +68,23 @@ def comb_spectrum(l):
         S += torch.exp(-0.5 * ((l - c) / 1.5)**2)
     return S
 
-def dispersion(l):
-    base = leds(l)
-    phase = 0.002 * (l - 555.0)**2
-    return base * torch.exp(1j * phase)
 
 cases = {
     "D65": normalize(d65(lbd)),
     "LED": normalize(leds(lbd)),
     "Blackbody": normalize(blackbody(lbd)),
-    "Beer–Lambert": normalize(beer_lambert(lbd)),
-    "Reflectance": normalize(reflectance(lbd)),
-    "Iridescence": normalize(iridescence(lbd)),
     "Step": normalize(step_spectrum(lbd)),
     "Laser": normalize(laser_spike(lbd)),
     "Comb": normalize(comb_spectrum(lbd)),
-    "Dispersion": normalize(dispersion(lbd)),
 }
+
 
 # ============================================================
 # Stress Sweep
 # ============================================================
 
-sigma = 8.0
+sigma_min = 5
+sigma_max = 9
 orders = range(6, 9)
 lobe_counts = range(6, 9)
 
@@ -114,10 +93,11 @@ for order in orders:
 
         centers = torch.linspace(420.0, 680.0, n_lobes).tolist()
 
-        basis = GHGSFMultiLobeBasis(
+        basis = GHGSFMultiLobeBasisScaled(
             domain=domain,
             centers=centers,
-            sigma=sigma,
+            sigma_min=sigma_min,  # narrow capture
+            sigma_max=sigma_max,  # smooth correction
             order=order
         )
 
@@ -126,35 +106,70 @@ for order in orders:
         print(f"Running {n_lobes} lobes × order {order} | cond={cond:.2e}")
 
         engine = MultiPanelEngine(
-            nrows=5,
+            nrows=3,
             ncols=2,
-            figsize=(14, 18),
+            figsize=(14, 12),
             compact=True
         )
 
+        # Build whitening operator once per basis
+        W = WhitenOperator.create(basis)
+
         for i, (name, S) in enumerate(cases.items()):
+
+            # ------------------------------------------------
+            # Projection & Reconstruction
+            # ------------------------------------------------
 
             coeffs = basis.project(S)
             R = basis.reconstruct(coeffs)
 
+            # ------------------------------------------------
+            # Raw State
+            # ------------------------------------------------
+
+            state_raw = SpectralState(basis, coeffs)
+
+            # ------------------------------------------------
+            # Whitened State
+            # ------------------------------------------------
+
+            state_white = state_raw.clone()
+            W.apply(state_white)
+
+            alpha_raw = state_raw.m_coeffs
+            alpha_white = state_white.m_coeffs
+
+            # ------------------------------------------------
+            # Error Metrics
+            # ------------------------------------------------
+
             L2 = torch.sqrt(
-                domain.integrate(torch.abs(S - R)**2)
+                domain.integrate((S - R)**2)
             ).item()
 
             Linf = torch.max(torch.abs(S - R)).item()
 
             energy_err = torch.abs(
-                domain.integrate(torch.abs(S)) -
-                domain.integrate(torch.abs(R))
+                domain.integrate(S) -
+                domain.integrate(R)
             ).item()
 
-            max_alpha = torch.max(torch.abs(coeffs)).item()
+            max_alpha_raw = torch.max(torch.abs(alpha_raw)).item()
+            max_alpha_white = torch.max(torch.abs(alpha_white)).item()
+
+            norm_raw = torch.linalg.norm(alpha_raw).item()
+            norm_white = torch.linalg.norm(alpha_white).item()
+
+            # ------------------------------------------------
+            # Plot
+            # ------------------------------------------------
 
             panel = engine.getPanel(i)
 
             lam_cpu = lbd.detach().cpu().numpy()
-            S_cpu = torch.abs(S).detach().cpu().numpy()
-            R_cpu = torch.abs(R).detach().cpu().numpy()
+            S_cpu = S.detach().cpu().numpy()
+            R_cpu = R.detach().cpu().numpy()
 
             panel.addLine(lam_cpu, S_cpu, linewidth=2.2, label="Original")
             panel.addLine(lam_cpu, R_cpu, linestyle="--", linewidth=2.0, label="Reconstruction")
@@ -166,18 +181,19 @@ for order in orders:
                 "L2": f"{L2:.2e}",
                 "L∞": f"{Linf:.2e}",
                 "ΔE": f"{energy_err:.2e}",
-                "max|α|": f"{max_alpha:.2e}"
+                "max|α|": f"{max_alpha_raw:.2e}",
+                "max|α̃|": f"{max_alpha_white:.2e}",
+                "||α||": f"{norm_raw:.2e}",
+                "||α̃||": f"{norm_white:.2e}"
             }, position='upper left')
 
         engine.addLegendOnlyFirst()
-
         engine.applyDenseLayout()
-
         engine.applyPublicationPreset()
 
         engine.setMainTitle(
             f"GHGSF Stress Test — {n_lobes} lobes × order {order}\n"
-            f"σ = {sigma} nm | Gram cond = {cond:.2e}"
+            f"σ = {sigma_min} nm  to {sigma_max} nm| Gram cond = {cond:.2e}"
         )
 
         engine.show()

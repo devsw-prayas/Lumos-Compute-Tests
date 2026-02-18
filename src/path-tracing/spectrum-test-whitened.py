@@ -103,8 +103,8 @@ cases = {
 # ============================================================
 
 sigma = 7.6
-orders = range(4, 9)
-lobe_counts = range(4, 9)
+orders = range(6, 9)
+lobe_counts = range(6, 9)
 
 for order in orders:
     for n_lobes in lobe_counts:
