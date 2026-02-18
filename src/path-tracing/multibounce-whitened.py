@@ -4,7 +4,7 @@ import numpy as np
 from core.SpectralDomain import SpectralDomain
 from core.GhgsfMultiLobeBasis import GHGSFMultiLobeBasis
 from plotting.Plot import PlotEngine
-import prrequisite
+
 
 # ============================================================
 # Domain
@@ -30,7 +30,7 @@ domain = SpectralDomain(
 )
 
 lam = domain.m_lambda
-torch.set_default_dtype(dtype)
+
 
 # ============================================================
 # Initial Spectrum
@@ -45,29 +45,9 @@ def initial_spectrum(l):
 S_init = initial_spectrum(lam)
 S_init /= domain.integrate(S_init)
 
-# ============================================================
-# Random Operators
-# ============================================================
-
-def random_smooth_spectrum(l, rng):
-    spectrum = torch.zeros_like(l)
-
-    for _ in range(rng.integers(2, 5)):
-        center = rng.uniform(410.0, 690.0)
-        width  = rng.uniform(10.0, 40.0)
-        amp    = rng.uniform(0.3, 1.2)
-
-        spectrum += amp * torch.exp(
-            -0.5 * ((l - center) / width)**2
-        )
-
-    return spectrum
-
-def iridescence_function(l, delta, A=0.4):
-    return 1.0 + A * torch.cos(2.0 * torch.pi * delta / l)
 
 # ============================================================
-# GHGSF Basis (Stable Sweet Spot)
+# GHGSF Basis
 # ============================================================
 
 sigma = 8.78
@@ -81,34 +61,52 @@ basis = GHGSFMultiLobeBasis(
     order=order
 )
 
-cond = torch.linalg.cond(basis.m_gram).item()
-print("Gram condition number:", cond)
+print("Gram condition number:", torch.linalg.cond(basis.m_gram).item())
 
-alpha_init = basis.project(S_init)
+# Whitened initial coefficients
+alpha_init = basis.projectWhitened(S_init)
+
 
 # ============================================================
-# Correct Galerkin Operator
+# Whitened Galerkin Operator
 # ============================================================
 
-def build_operator(f_lambda):
+def build_operator_whitened(f_lambda):
+
     B = basis.m_basisRaw
     dl = basis.m_domain.m_delta
     dx = dl / basis.m_sigma
 
     weighted_basis = B * f_lambda.unsqueeze(0)
-
     O_raw = (weighted_basis @ B.T) * dx
 
-    return torch.linalg.solve(basis.m_gram, O_raw)
+    # Unwhitened operator
+    O = torch.linalg.solve(basis.m_gram, O_raw)
+
+    # Whitening transform
+    LT = basis.m_LT
+    LinvT = basis.m_LinvT
+
+    # O_tilde = L^T O L^{-T}
+    O_tilde = LT @ O @ LinvT
+
+    return O_tilde
+
+
+# ============================================================
+# Diagnostics Storage
+# ============================================================
 
 mean_operator_conds = []
 mean_operator_radii = []
 mean_sigma_mins = []
 mean_energy_errors = []
+errors_L2 = []
+bounce_levels = []
 
 
 # ============================================================
-# Ultra High Bounce Test (PURE TORCH)
+# Ultra High Bounce Test
 # ============================================================
 
 gen = torch.Generator(device=device)
@@ -117,10 +115,8 @@ gen.manual_seed(42)
 num_paths   = 64
 max_bounces = 15
 
-errors_L2 = []
-bounce_levels = []
-
 for bounce_depth in range(1, max_bounces + 1):
+
     operator_conds = []
     operator_radii = []
     sigma_mins = []
@@ -136,7 +132,7 @@ for bounce_depth in range(1, max_bounces + 1):
 
         for _ in range(bounce_depth):
 
-            # ----- random smooth absorption -----
+            # Random absorption
             sigma_s = torch.zeros_like(lam)
 
             for _ in range(torch.randint(2, 5, (1,), generator=gen, device=device).item()):
@@ -148,7 +144,7 @@ for bounce_depth in range(1, max_bounces + 1):
                     -0.5 * ((lam - center) / width)**2
                 )
 
-            # ----- random reflectance -----
+            # Random reflectance
             refl = torch.zeros_like(lam)
 
             for _ in range(torch.randint(2, 5, (1,), generator=gen, device=device).item()):
@@ -166,41 +162,38 @@ for bounce_depth in range(1, max_bounces + 1):
             f_lambda *= refl
             f_lambda *= (1.0 + 0.4 * torch.cos(2.0 * torch.pi * delta / lam))
 
-            # ----- ground truth update -----
+            # Ground truth
             S_gt = S_gt * f_lambda
 
-            # ----- operator update -----
-            O = build_operator(f_lambda)
+            # Whitened operator update
+            O_tilde = build_operator_whitened(f_lambda)
 
-            # --- SVD diagnostics ---
-            svals = torch.linalg.svdvals(O)
+            # Diagnostics
+            svals = torch.linalg.svdvals(O_tilde)
             condO = (svals.max() / svals.min()).item()
             operator_conds.append(condO)
             sigma_mins.append(svals.min().item())
 
-            # --- Spectral radius ---
-            eigvals = torch.linalg.eigvals(O)
+            eigvals = torch.linalg.eigvals(O_tilde)
             rho = torch.max(torch.abs(eigvals)).item()
             operator_radii.append(rho)
 
-            alpha = O @ alpha
+            # Evolve whitened state
+            alpha = O_tilde @ alpha
 
             E_gt = domain.integrate(S_gt).item()
-            E_op = domain.integrate(basis.reconstruct(alpha)).item()
+            E_op = domain.integrate(basis.reconstructWhitened(alpha)).item()
             energy_errors.append(abs(E_gt - E_op))
 
         accum_gt += S_gt
-        accum_op += basis.reconstruct(alpha)
+        accum_op += basis.reconstructWhitened(alpha)
 
-    # ----- average paths -----
     accum_gt /= num_paths
     accum_op /= num_paths
 
-    # ----- normalize -----
     accum_gt /= domain.integrate(accum_gt)
     accum_op /= domain.integrate(accum_op)
 
-    # ----- L2 error -----
     L2 = torch.sqrt(
         domain.integrate((accum_gt - accum_op) ** 2)
     ).item()
@@ -213,94 +206,45 @@ for bounce_depth in range(1, max_bounces + 1):
     mean_sigma_mins.append(np.mean(sigma_mins))
     mean_energy_errors.append(np.mean(energy_errors))
 
+
 # ============================================================
-# Plot 1: Error Growth
+# Plots
 # ============================================================
 
 engine_err = PlotEngine(figsize=(8, 5))
-
-engine_err.addLine(
-    torch.tensor(bounce_levels).cpu().numpy(),
-    torch.tensor(errors_L2).cpu().numpy(),
-    linewidth=2.2,
-    label="L2 Error"
-)
-
-engine_err.setTitle("Operator-Space Spectral Transport Error Growth")
+engine_err.addLine(np.array(bounce_levels), np.array(errors_L2), linewidth=2.2, label="L2 Error")
+engine_err.setTitle("Whitened Operator-Space Spectral Transport Error Growth")
 engine_err.setLabels("Bounce Depth", "L2 Error")
 engine_err.addLegend()
 engine_err.show()
 
-engine_spec = PlotEngine(figsize=(10, 4))
-
-engine_spec.addLine(
-    lam.detach().cpu().numpy(),
-    accum_gt.detach().cpu().numpy(),
-    linewidth=2.5,
-    label="Ground Truth"
-)
-
-engine_spec.addLine(
-    lam.detach().cpu().numpy(),
-    accum_op.detach().cpu().numpy(),
-    linestyle="--",
-    linewidth=2.5,
-    label="Operator BsSPT"
-)
-
-engine_spec.setTitle("Final Spectrum After Ultra High Bounces")
-engine_spec.setLabels("Wavelength (nm)", "Power")
-engine_spec.addLegend()
-engine_spec.show()
-
 engine_condO = PlotEngine(figsize=(8, 5))
-engine_condO.addLine(
-    np.array(bounce_levels),
-    np.array(mean_operator_conds),
-    linewidth=2.2,
-    label="cond(O)"
-)
-engine_condO.setTitle("Operator Conditioning vs Bounce Depth")
+engine_condO.addLine(np.array(bounce_levels), np.array(mean_operator_conds), linewidth=2.2, label="cond(Õ)")
+engine_condO.setTitle("Whitened Operator Conditioning vs Bounce Depth")
 engine_condO.setLabels("Bounce Depth", "Condition Number")
 engine_condO.addLegend()
 engine_condO.m_axes.set_yscale("log")
 engine_condO.show()
 
 engine_rho = PlotEngine(figsize=(8, 5))
-engine_rho.addLine(
-    np.array(bounce_levels),
-    np.array(mean_operator_radii),
-    linewidth=2.2,
-    label="Spectral Radius"
-)
+engine_rho.addLine(np.array(bounce_levels), np.array(mean_operator_radii), linewidth=2.2, label="Spectral Radius")
 engine_rho.addHorizontalLine(1.0, label="ρ = 1")
-engine_rho.setTitle("Spectral Radius vs Bounce Depth")
-engine_rho.setLabels("Bounce Depth", "ρ(O)")
+engine_rho.setTitle("Whitened Spectral Radius vs Bounce Depth")
+engine_rho.setLabels("Bounce Depth", "ρ(Õ)")
 engine_rho.addLegend()
 engine_rho.show()
 
 engine_sigma = PlotEngine(figsize=(8, 5))
-engine_sigma.addLine(
-    np.array(bounce_levels),
-    np.array(mean_sigma_mins),
-    linewidth=2.2,
-    label="σ_min(O)"
-)
-engine_sigma.setTitle("Minimum Singular Value vs Bounce Depth")
+engine_sigma.addLine(np.array(bounce_levels), np.array(mean_sigma_mins), linewidth=2.2, label="σ_min(Õ)")
+engine_sigma.setTitle("Whitened Minimum Singular Value vs Bounce Depth")
 engine_sigma.setLabels("Bounce Depth", "σ_min")
 engine_sigma.addLegend()
 engine_sigma.m_axes.set_yscale("log")
 engine_sigma.show()
 
 engine_energy = PlotEngine(figsize=(8, 5))
-engine_energy.addLine(
-    np.array(bounce_levels),
-    np.array(mean_energy_errors),
-    linewidth=2.2,
-    label="|E_gt - E_op|"
-)
-engine_energy.setTitle("Energy Drift vs Bounce Depth")
+engine_energy.addLine(np.array(bounce_levels), np.array(mean_energy_errors), linewidth=2.2, label="Energy Drift")
+engine_energy.setTitle("Whitened Energy Drift vs Bounce Depth")
 engine_energy.setLabels("Bounce Depth", "Absolute Energy Error")
 engine_energy.addLegend()
 engine_energy.show()
-
