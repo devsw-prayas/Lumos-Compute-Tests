@@ -83,10 +83,10 @@ cases = {
 # Stress Sweep
 # ============================================================
 
-sigma_min = 5
-sigma_max = 9
-orders = range(6, 9)
-lobe_counts = range(6, 9)
+sigma_min = 7
+sigma_max = 12
+orders = range(4, 9)
+lobe_counts = range(4, 9)
 
 for order in orders:
     for n_lobes in lobe_counts:
